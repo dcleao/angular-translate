@@ -872,14 +872,24 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
        * or rejects with given language key.
        *
        * @param {string} key Language key.
+       * @param {boolean} force Indicates that a new loading should occur even
+       *  if a resolved promise already exists.
        * @return {Promise} A promise.
        */
-      var loadAsync = function (key) {
+      var loadAsync = function (key, force) {
         if (!key) {
           throw 'No language key specified for loading.';
         }
+        
+        // Use existing promise, unless `force` and a resolve is not already under way.
+        var promise = langPromises[key];
+        if (promise && !(force && promise.isOk !== null)) {
+          return promise;
+        }
 
         var deferred = $q.defer();
+        promise = langPromises[key] = deferred.promise;
+        promise.isOk = null;
 
         $rootScope.$emit('$translateLoadingStart');
         pendingLoader = true;
@@ -898,17 +908,19 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
             angular.extend(translationTable, flatObject(data));
           }
           pendingLoader = false;
+          promise.isOk = true;
           deferred.resolve({
             key: key,
             table: translationTable
           });
           $rootScope.$emit('$translateLoadingEnd');
         }, function (key) {
+          promise.isOk = false;
           $rootScope.$emit('$translateLoadingError');
           deferred.reject(key);
           $rootScope.$emit('$translateLoadingEnd');
         });
-        return deferred.promise;
+        return promise;
       };
 
       if ($storageFactory) {
@@ -1279,9 +1291,7 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
           if ($loaderFactory) {
             if ($fallbackLanguage && $fallbackLanguage.length) {
               for (var i = 0, len = $fallbackLanguage.length; i < len; i++) {
-                if (!langPromises[$fallbackLanguage[i]]) {
-                  langPromises[$fallbackLanguage[i]] = loadAsync($fallbackLanguage[i]);
-                }
+                loadAsync($fallbackLanguage[i]);
               }
             }
           }
@@ -1389,22 +1399,34 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
 
         // if there isn't a translation table for the language we've requested,
         // we load it asynchronously
-        if (!$translationTable[key] && $loaderFactory && !langPromises[key]) {
-          $nextLang = key;
-          langPromises[key] = loadAsync(key).then(function (translation) {
-            translations(translation.key, translation.table);
-            deferred.resolve(translation.key);
+        if (!$translationTable[key] && $loaderFactory) {
+          if (langPromises[key]) {
+            $nextLang = key;
+            langPromises[key].then(function(translation) {
+              deferred.resolve(key);
 
-            if ($nextLang === key) {
-              useLanguage(translation.key);
+              if ($nextLang === key) {
+                useLanguage(translation.key);
+                $nextLang = undefined;
+              }
+            });
+          } else {
+            $nextLang = key;
+            loadAsync(key).then(function (translation) {
+              translations(translation.key, translation.table);
+              deferred.resolve(translation.key);
+
+              if ($nextLang === key) {
+                useLanguage(translation.key);
+                $nextLang = undefined;
+              }
+            }, function (key) {
               $nextLang = undefined;
-            }
-          }, function (key) {
-            $nextLang = undefined;
-            $rootScope.$emit('$translateChangeError');
-            deferred.reject(key);
-            $rootScope.$emit('$translateChangeEnd');
-          });
+              $rootScope.$emit('$translateChangeError');
+              deferred.reject(key);
+              $rootScope.$emit('$translateChangeEnd');
+            });
+          }
         } else {
           deferred.resolve(key);
           useLanguage(key);
@@ -1496,13 +1518,14 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
           // reload registered fallback languages
           if ($fallbackLanguage && $fallbackLanguage.length) {
             for (var i = 0, len = $fallbackLanguage.length; i < len; i++) {
-              tables.push(loadAsync($fallbackLanguage[i]));
+              if ($uses !== langPromises[$fallbackLanguage])
+                tables.push(loadAsync($fallbackLanguage[i], true));
             }
           }
 
           // reload currently used language
           if ($uses) {
-            tables.push(loadAsync($uses));
+            tables.push(loadAsync($uses, true));
           }
 
           $q.all(tables).then(function (tableData) {
@@ -1520,7 +1543,7 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
 
         } else if ($translationTable[langKey]) {
 
-          loadAsync(langKey).then(function (data) {
+          loadAsync(langKey, true).then(function (data) {
             translations(data.key, data.table);
             if (langKey === $uses) {
               useLanguage($uses);
@@ -1628,7 +1651,8 @@ angular.module('pascalprecht.translate').provider('$translate', ['$STORAGE_KEY',
             translations(translation.key, translation.table);
           };
           for (var i = 0, len = $fallbackLanguage.length; i < len; i++) {
-            langPromises[$fallbackLanguage[i]] = loadAsync($fallbackLanguage[i]).then(processAsyncResult);
+            loadAsync($fallbackLanguage[i])
+              .then(processAsyncResult);
           }
         }
       }
